@@ -93,7 +93,7 @@ bot.on('text', async (ctx) => {
 
     try {
         const model = genAI.getGenerativeModel({ 
-            model: "gemini-1.5-flash",
+            model: "gemini-2.5-flash",
             generationConfig: { responseMimeType: "application/json" }
         });
 
@@ -174,7 +174,7 @@ bot.on('text', async (ctx) => {
             }
         });
 
-   } catch (error) {
+    } catch (error) {
         console.error("Error procesando con IA:", error);
         ctx.telegram.editMessageText(ctx.chat.id, mensajeEspera.message_id, null, `🚨 ERROR TÉCNICO: ${error.message}`);
     }
