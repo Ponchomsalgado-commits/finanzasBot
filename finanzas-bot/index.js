@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const mongoose = require('mongoose');
+const { GoogleGenerativeAI } = require('@google/generative-ai'); // Integración de IA
 
 // 1. Conexión a MongoDB Atlas
 mongoose.connect(process.env.MONGO_URI)
@@ -11,7 +12,7 @@ mongoose.connect(process.env.MONGO_URI)
 const transaccionSchema = new mongoose.Schema({
     tipo: { type: String, enum: ['gasto', 'ingreso', 'transferencia'], required: true },
     cantidad: { type: Number, required: true },
-    cantidadRecibida: { type: Number }, // NUEVO: Para transferencias cruzadas
+    cantidadRecibida: { type: Number }, // Para transferencias cruzadas
     concepto: { type: String, required: true },
     cuenta: { type: String, enum: ['efectivo', 'arq', 'banorte', 'ahorros'], required: true },
     cuentaDestino: { type: String, enum: ['efectivo', 'arq', 'banorte', 'ahorros'] }, 
@@ -20,180 +21,166 @@ const transaccionSchema = new mongoose.Schema({
 
 const Transaccion = mongoose.model('Transaccion', transaccionSchema);
 
-// 3. Función para obtener el tipo de cambio en tiempo real
+// 3. Inicializamos las APIs externas (Gemini y ExchangeRate)
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
 async function obtenerTipoCambio() {
     try {
-        // Usamos una API gratuita que se actualiza cada 24 hrs
         const response = await fetch('https://api.exchangerate-api.com/v4/latest/USD');
         const data = await response.json();
-        return data.rates.MXN; // Retorna el valor actual, ej: 16.80
+        return data.rates.MXN; 
     } catch (error) {
         console.error('Error al obtener el dólar:', error);
-        return 17.00; // Un valor "de emergencia" por si la API falla
+        return 17.00; // Valor de emergencia
     }
 }
 
-
-
-
-
-// 3. Inicializar el Bot
+// 4. Inicializar el Bot de Telegram
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
 bot.start((ctx) => {
-    ctx.reply('¡Hola! Soy tu bot de finanzas.\n\nFormato: [gasto/ingreso] [cantidad] [concepto] [método]\nTransferencia: transferencia [cantidad] [cuenta_origen] a [cuenta_destino]');
+    ctx.reply('¡Hola! Soy tu bot de finanzas impulsado por IA.\n\nPuedes hablarme normal, por ejemplo:\n"Me gasté 150 en tacos de mi banorte"\n"Transfiere 50 dólares físicos al cochinito"');
 });
 
-// 📌 4. COMANDOS ESPECÍFICOS PRIMERO (Para que no se confundan con texto normal)
-// Comando para consultar el Balance Múltiple
-
-
-
-// Comando para consultar el Balance Multidivisa
+// 📌 5. COMANDOS: Balance Multidivisa
 bot.command('balance', async (ctx) => {
     try {
         const transacciones = await Transaccion.find();
         let saldos = { efectivo: 0, arq: 0, banorte: 0, ahorros: 0 };
 
-        // Procesamos la matemática cuenta por cuenta
         transacciones.forEach(t => {
             if (t.tipo === 'ingreso') {
                 saldos[t.cuenta] += t.cantidad;
             } else if (t.tipo === 'gasto') {
                 saldos[t.cuenta] -= t.cantidad;
             } else if (t.tipo === 'transferencia') {
-                saldos[t.cuenta] -= t.cantidad; // Sale de la cuenta origen
-                // Entra a la cuenta destino (usa la recibida si hubo conversión, si no, la original)
+                saldos[t.cuenta] -= t.cantidad; 
                 saldos[t.cuentaDestino] += (t.cantidadRecibida || t.cantidad); 
             }
         });
 
-        // Separamos los saldos por moneda
         const totalPesos = saldos.efectivo + saldos.banorte;
         const totalDolares = saldos.arq + saldos.ahorros;
-
-        // Obtenemos el precio del dólar en este exacto momento
         const precioDolar = await obtenerTipoCambio();
-        
-        // Calculamos el patrimonio total en MXN
         const patrimonioGlobalMXN = totalPesos + (totalDolares * precioDolar);
 
         const mensajeBalance = `📊 *ESTADO DE CUENTAS*\n` +
             `💵 Dólar actual: $${precioDolar.toFixed(2)} MXN\n\n` +
             `🇲🇽 *Cuentas en Pesos (MXN)*\n` +
             `💵 Efectivo: $${saldos.efectivo.toFixed(2)}\n` +
-            `🟥 Banorte: $${saldos.banorte.toFixed(2)}\n` +
+            `🏦 Banorte: $${saldos.banorte.toFixed(2)}\n` +
             `🔹 Total MXN: $${totalPesos.toFixed(2)}\n\n` +
             `🇺🇸 *Cuentas en Dólares (USD)*\n` +
-            `⬜ ARQ: $${saldos.arq.toFixed(2)}\n` +
+            `🏢 ARQ: $${saldos.arq.toFixed(2)}\n` +
             `🐷 Ahorros: $${saldos.ahorros.toFixed(2)}\n` +
             `🔹 Total USD: $${totalDolares.toFixed(2)}\n` +
             `➖➖➖➖➖➖➖➖\n` +
             `💰 *PATRIMONIO TOTAL: $${patrimonioGlobalMXN.toFixed(2)} MXN*`;
 
         ctx.reply(mensajeBalance, { parse_mode: 'Markdown' });
-
     } catch (error) {
         console.error(error);
         ctx.reply('❌ Hubo un error al calcular tus saldos.');
     }
 });
-// 📌 5. LECTOR DE TEXTO NORMAL DESPUÉS
-// Lógica principal: Recibir y Guardar
+
+// 📌 6. PROCESAMIENTO DE LENGUAJE NATURAL CON GEMINI AI
 bot.on('text', async (ctx) => {
-    const mensaje = ctx.message.text.trim();
+    const mensajeUsuario = ctx.message.text.trim();
+    if (mensajeUsuario.startsWith('/')) return; // Ignorar comandos mal escritos
 
-    // Regex para GASTOS o INGRESOS (ej: gasto 150 tacos banorte)
-    const regexNormal = /^(gasto|ingreso)\s+(\d+(?:\.\d{1,2})?)\s+(.+)\s+(efectivo|arq|banorte|ahorros)$/i;
-    // Regex para TRANSFERENCIAS (ej: transferencia 500 banorte a ahorros)
-    const regexTransferencia = /^transferencia\s+(\d+(?:\.\d{1,2})?)\s+(efectivo|arq|banorte|ahorros)\s+a\s+(efectivo|arq|banorte|ahorros)$/i;
+    const mensajeEspera = await ctx.reply('🤔 Analizando transacción...');
 
-    let transaccionData = null;
-    let mensajeRespuesta = "";
+    try {
+        const model = genAI.getGenerativeModel({ 
+            model: "gemini-1.5-flash",
+            generationConfig: { responseMimeType: "application/json" }
+        });
 
-    if (regexNormal.test(mensaje)) {
-        const coincidencia = mensaje.match(regexNormal);
-        transaccionData = {
-            tipo: coincidencia[1].toLowerCase(),
-            cantidad: parseFloat(coincidencia[2]),
-            concepto: coincidencia[3].trim(),
-            cuenta: coincidencia[4].toLowerCase()
-        };
-        const icono = transaccionData.tipo === 'ingreso' ? '📈' : '📉';
-        mensajeRespuesta = `${icono} ¡${transaccionData.tipo.toUpperCase()} Guardado!\n💰 $${transaccionData.cantidad} en ${transaccionData.concepto}\n🏦 Cuenta: ${transaccionData.cuenta.toUpperCase()}`;
-    
-    } else if (regexTransferencia.test(mensaje)) {
-        const coincidencia = mensaje.match(regexTransferencia);
-        const cantidadOrigen = parseFloat(coincidencia[1]);
-        const cuentaOrigen = coincidencia[2].toLowerCase();
-        const cuentaDest = coincidencia[3].toLowerCase();
+        const prompt = `
+        Eres una API financiera. Analiza el siguiente mensaje del usuario y extrae los datos de la transacción.
         
-        // Clasificamos qué cuentas manejan qué moneda
-        const cuentasMXN = ['efectivo', 'banorte'];
-        const cuentasUSD = ['arq', 'ahorros'];
+        REGLAS ESTRICTAS:
+        1. Cuentas válidas: "efectivo", "arq", "banorte", "ahorros". Si menciona banco, es banorte. Si menciona dólares físicos, es arq. Si menciona cochinito/guardado, es ahorros.
+        2. Tipos válidos: "gasto", "ingreso", "transferencia".
+        3. Si es un gasto o ingreso, "cuentaDestino" debe ser null. Si falta el concepto, usa "Varios".
+        4. Si es transferencia, debes identificar "cuenta" (origen) y "cuentaDestino".
+        5. Devuelve ÚNICAMENTE un objeto JSON con este formato exacto:
+        {"tipo": "gasto", "cantidad": 150, "concepto": "cine", "cuenta": "banorte", "cuentaDestino": null}
+        
+        Mensaje del usuario: "${mensajeUsuario}"
+        `;
 
-        const origenEsMXN = cuentasMXN.includes(cuentaOrigen);
-        const destinoEsMXN = cuentasMXN.includes(cuentaDest);
+        const result = await model.generateContent(prompt);
+        const respuestaIA = result.response.text();
+        const datosGenerados = JSON.parse(respuestaIA);
 
-        let cantidadFinal = cantidadOrigen;
-        let detalleConversion = "";
+        let transaccionData = null;
+        let mensajeRespuesta = "";
 
-        // Si cruzan divisas, hacemos la conversión
-        if (origenEsMXN !== destinoEsMXN) {
-            const precioDolar = await obtenerTipoCambio();
-            
-            if (origenEsMXN && !destinoEsMXN) {
-                // MXN a USD (Compra de dólares -> +50 centavos de margen de casa de cambio)
-                const tasaVenta = precioDolar + 0.50;
-                cantidadFinal = cantidadOrigen / tasaVenta;
-                detalleConversion = `\n💱 Tasa de cambio: $${tasaVenta.toFixed(2)}`;
-            } else {
-                // USD a MXN (Venta de dólares -> -50 centavos de margen)
-                const tasaCompra = precioDolar - 0.50;
-                cantidadFinal = cantidadOrigen * tasaCompra;
-                detalleConversion = `\n💱 Tasa de cambio: $${tasaCompra.toFixed(2)}`;
+        if (datosGenerados.tipo === 'gasto' || datosGenerados.tipo === 'ingreso') {
+            transaccionData = {
+                tipo: datosGenerados.tipo,
+                cantidad: datosGenerados.cantidad,
+                concepto: datosGenerados.concepto || 'Varios',
+                cuenta: datosGenerados.cuenta
+            };
+            const icono = transaccionData.tipo === 'ingreso' ? '📈' : '📉';
+            mensajeRespuesta = `${icono} ¡${transaccionData.tipo.toUpperCase()} Guardado!\n💰 $${transaccionData.cantidad} en ${transaccionData.concepto}\n🏦 Cuenta: ${transaccionData.cuenta.toUpperCase()}`;
+        
+        } else if (datosGenerados.tipo === 'transferencia') {
+            const cuentasMXN = ['efectivo', 'banorte'];
+            const origenEsMXN = cuentasMXN.includes(datosGenerados.cuenta);
+            const destinoEsMXN = cuentasMXN.includes(datosGenerados.cuentaDestino);
+
+            let cantidadFinal = datosGenerados.cantidad;
+            let detalleConversion = "";
+
+            if (origenEsMXN !== destinoEsMXN) {
+                const precioDolar = await obtenerTipoCambio();
+                if (origenEsMXN && !destinoEsMXN) {
+                    const tasaVenta = precioDolar + 0.50;
+                    cantidadFinal = datosGenerados.cantidad / tasaVenta;
+                    detalleConversion = `\n💱 Tasa de cambio: $${tasaVenta.toFixed(2)}`;
+                } else {
+                    const tasaCompra = precioDolar - 0.50;
+                    cantidadFinal = datosGenerados.cantidad * tasaCompra;
+                    detalleConversion = `\n💱 Tasa de cambio: $${tasaCompra.toFixed(2)}`;
+                }
             }
+
+            transaccionData = {
+                tipo: 'transferencia',
+                cantidad: datosGenerados.cantidad,
+                cantidadRecibida: parseFloat(cantidadFinal.toFixed(2)),
+                concepto: 'Traspaso entre cuentas',
+                cuenta: datosGenerados.cuenta,
+                cuentaDestino: datosGenerados.cuentaDestino
+            };
+            
+            mensajeRespuesta = `🔄 ¡TRANSFERENCIA Guardada!\n📤 Salió: ${datosGenerados.cantidad} (${datosGenerados.cuenta.toUpperCase()})\n📥 Entró: ${cantidadFinal.toFixed(2)} (${datosGenerados.cuentaDestino.toUpperCase()})${detalleConversion}`;
         }
 
-        transaccionData = {
-            tipo: 'transferencia',
-            cantidad: cantidadOrigen,
-            cantidadRecibida: parseFloat(cantidadFinal.toFixed(2)), // Guardamos lo que realmente llega
-            concepto: 'Traspaso entre cuentas',
-            cuenta: cuentaOrigen,
-            cuentaDestino: cuentaDest
-        };
-        
-        mensajeRespuesta = `🔄 ¡TRANSFERENCIA Guardada!\n📤 Salió: ${cantidadOrigen} (${cuentaOrigen.toUpperCase()})\n📥 Entró: ${cantidadFinal.toFixed(2)} (${cuentaDest.toUpperCase()})${detalleConversion}`;
-    }
+        const nuevaTransaccion = new Transaccion(transaccionData);
+        await nuevaTransaccion.save();
 
-    // Si detectó un formato válido, lo guarda en BD
-    if (transaccionData) {
-        try {
-            const nuevaTransaccion = new Transaccion(transaccionData);
-            await nuevaTransaccion.save();
+        ctx.telegram.editMessageText(ctx.chat.id, mensajeEspera.message_id, null, mensajeRespuesta, {
+            reply_markup: {
+                inline_keyboard: [[ Markup.button.callback('❌ Borrar registro', `del_${nuevaTransaccion._id}`) ]]
+            }
+        });
 
-            ctx.reply(mensajeRespuesta, Markup.inlineKeyboard([
-                Markup.button.callback('❌ Borrar registro', `del_${nuevaTransaccion._id}`)
-            ]));
-        } catch (error) {
-            console.error(error);
-            ctx.reply('❌ Error al guardar en la base de datos.');
-        }
-    } else {
-        ctx.reply('❌ Formato incorrecto.\nNormal: gasto 150 tacos banorte\nTransferencia: transferencia 500 banorte a ahorros');
+    } catch (error) {
+        console.error("Error procesando con IA:", error);
+        ctx.telegram.editMessageText(ctx.chat.id, mensajeEspera.message_id, null, '❌ No pude entender esa instrucción. Intenta ser un poco más claro con la cantidad y las cuentas.');
     }
 });
 
-// 📌 6. LÓGICA DE BOTONES Y ARRANQUE AL FINAL
-// Lógica para Borrar usando el ID de MongoDB
+// 📌 7. LÓGICA DE BOTONES PARA BORRAR REGISTROS
 bot.action(/^del_(.+)$/, async (ctx) => {
-    const idTransaccion = ctx.match[1]; // Extraemos el ID de MongoDB
-
+    const idTransaccion = ctx.match[1]; 
     try {
-        // Buscamos y eliminamos el documento en la base de datos
         const transaccionBorrada = await Transaccion.findByIdAndDelete(idTransaccion);
-
         if (transaccionBorrada) {
             ctx.editMessageText('🗑️ Registro eliminado de la base de datos exitosamente.');
         } else {
@@ -205,19 +192,18 @@ bot.action(/^del_(.+)$/, async (ctx) => {
     }
 });
 
+// 📌 8. ARRANQUE DEL BOT Y SERVIDOR WEB FANTASMA (PARA RENDER)
 bot.launch();
-console.log('🤖 Bot de finanzas corriendo...');
+console.log('🤖 Bot de finanzas corriendo con Inteligencia Artificial...');
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
-// Servidor Web "Fantasma" para engañar a Render y evitar el error 254
 const http = require('http');
 const puerto = process.env.PORT || 3000;
-
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.write('El Bot de Finanzas esta activo 🤖');
+    res.write('El Bot de Finanzas Inteligente esta activo 🤖🧠');
     res.end();
 }).listen(puerto, () => {
     console.log(`🌐 Servidor web fantasma escuchando en el puerto ${puerto}`);
