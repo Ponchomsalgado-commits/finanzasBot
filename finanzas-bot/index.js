@@ -81,8 +81,8 @@ bot.command('balance', async (ctx) => {
         const mensajeBalance = `📊 *ESTADO DE CUENTAS*\n` +
             `💵 Dólar actual: $${precioDolar.toFixed(2)} MXN\n\n` +
             `🇲🇽 *Cuentas en Pesos (MXN)*\n` +
-            `💵 Efectivo:        $${saldos.efectivo.toFixed(2)}\n` +
-            `🟥 Banorte:         $${saldos.banorte.toFixed(2)}\n` +
+            `💵 Efectivo:          $${saldos.efectivo.toFixed(2)}\n` +
+            `🟥 Banorte:       $${saldos.banorte.toFixed(2)}\n` +
             `🔹 Total MXN:   $${totalPesos.toFixed(2)}\n\n` +
             `🇺🇸 *Cuentas en Dólares (USD)*\n` +
             `⬜ ARQ:              $${saldos.arq.toFixed(2)}\n` +
