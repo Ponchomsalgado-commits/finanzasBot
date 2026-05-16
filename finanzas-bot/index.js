@@ -11,13 +11,31 @@ mongoose.connect(process.env.MONGO_URI)
 const transaccionSchema = new mongoose.Schema({
     tipo: { type: String, enum: ['gasto', 'ingreso', 'transferencia'], required: true },
     cantidad: { type: Number, required: true },
+    cantidadRecibida: { type: Number }, // NUEVO: Para transferencias cruzadas
     concepto: { type: String, required: true },
     cuenta: { type: String, enum: ['efectivo', 'arq', 'banorte', 'ahorros'], required: true },
-    cuentaDestino: { type: String, enum: ['efectivo', 'arq', 'banorte', 'ahorros'] }, // Solo para transferencias
+    cuentaDestino: { type: String, enum: ['efectivo', 'arq', 'banorte', 'ahorros'] }, 
     fecha: { type: Date, default: Date.now }
 });
 
 const Transaccion = mongoose.model('Transaccion', transaccionSchema);
+
+// 3. Función para obtener el tipo de cambio en tiempo real
+async function obtenerTipoCambio() {
+    try {
+        // Usamos una API gratuita que se actualiza cada 24 hrs
+        const response = await fetch('https://api.exchangerate-api.com/v4/latest/USD');
+        const data = await response.json();
+        return data.rates.MXN; // Retorna el valor actual, ej: 16.80
+    } catch (error) {
+        console.error('Error al obtener el dólar:', error);
+        return 17.00; // Un valor "de emergencia" por si la API falla
+    }
+}
+
+
+
+
 
 // 3. Inicializar el Bot
 const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -31,18 +49,11 @@ bot.start((ctx) => {
 
 
 
+// Comando para consultar el Balance Multidivisa
 bot.command('balance', async (ctx) => {
     try {
-        // Traemos todas las transacciones
         const transacciones = await Transaccion.find();
-
-        // Inicializamos los saldos en 0
-        let saldos = {
-            efectivo: 0,
-            arq: 0,
-            banorte: 0,
-            ahorros: 0
-        };
+        let saldos = { efectivo: 0, arq: 0, banorte: 0, ahorros: 0 };
 
         // Procesamos la matemática cuenta por cuenta
         transacciones.forEach(t => {
@@ -52,20 +63,33 @@ bot.command('balance', async (ctx) => {
                 saldos[t.cuenta] -= t.cantidad;
             } else if (t.tipo === 'transferencia') {
                 saldos[t.cuenta] -= t.cantidad; // Sale de la cuenta origen
-                saldos[t.cuentaDestino] += t.cantidad; // Entra a la cuenta destino
+                // Entra a la cuenta destino (usa la recibida si hubo conversión, si no, la original)
+                saldos[t.cuentaDestino] += (t.cantidadRecibida || t.cantidad); 
             }
         });
 
-        const totalGlobal = saldos.efectivo + saldos.arq + saldos.banorte + saldos.ahorros;
+        // Separamos los saldos por moneda
+        const totalPesos = saldos.efectivo + saldos.banorte;
+        const totalDolares = saldos.arq + saldos.ahorros;
 
-        // Armamos el mensaje final
-        const mensajeBalance = `📊 *ESTADO DE CUENTAS*\n\n` +
-            `💵 Efectivo:    $${saldos.efectivo.toFixed(2)}\n` +
-            `⬜ ARQ:          $${saldos.arq.toFixed(2)}\n` +
-            `🟥 Banorte:    $${saldos.banorte.toFixed(2)}\n` +
-            `🐷 Ahorros:    $${saldos.ahorros.toFixed(2)}\n` +
+        // Obtenemos el precio del dólar en este exacto momento
+        const precioDolar = await obtenerTipoCambio();
+        
+        // Calculamos el patrimonio total en MXN
+        const patrimonioGlobalMXN = totalPesos + (totalDolares * precioDolar);
+
+        const mensajeBalance = `📊 *ESTADO DE CUENTAS*\n` +
+            `💵 Dólar actual: $${precioDolar.toFixed(2)} MXN\n\n` +
+            `🇲🇽 *Cuentas en Pesos (MXN)*\n` +
+            `💵 Efectivo: $${saldos.efectivo.toFixed(2)}\n` +
+            `🟥 Banorte: $${saldos.banorte.toFixed(2)}\n` +
+            `🔹 Total MXN: $${totalPesos.toFixed(2)}\n\n` +
+            `🇺🇸 *Cuentas en Dólares (USD)*\n` +
+            `⬜ ARQ: $${saldos.arq.toFixed(2)}\n` +
+            `🐷 Ahorros: $${saldos.ahorros.toFixed(2)}\n` +
+            `🔹 Total USD: $${totalDolares.toFixed(2)}\n` +
             `➖➖➖➖➖➖➖➖\n` +
-            `💰 *PATRIMONIO TOTAL: $${totalGlobal.toFixed(2)}*`;
+            `💰 *PATRIMONIO TOTAL: $${patrimonioGlobalMXN.toFixed(2)} MXN*`;
 
         ctx.reply(mensajeBalance, { parse_mode: 'Markdown' });
 
@@ -74,7 +98,6 @@ bot.command('balance', async (ctx) => {
         ctx.reply('❌ Hubo un error al calcular tus saldos.');
     }
 });
-
 // 📌 5. LECTOR DE TEXTO NORMAL DESPUÉS
 // Lógica principal: Recibir y Guardar
 bot.on('text', async (ctx) => {
@@ -101,14 +124,47 @@ bot.on('text', async (ctx) => {
     
     } else if (regexTransferencia.test(mensaje)) {
         const coincidencia = mensaje.match(regexTransferencia);
+        const cantidadOrigen = parseFloat(coincidencia[1]);
+        const cuentaOrigen = coincidencia[2].toLowerCase();
+        const cuentaDest = coincidencia[3].toLowerCase();
+        
+        // Clasificamos qué cuentas manejan qué moneda
+        const cuentasMXN = ['efectivo', 'banorte'];
+        const cuentasUSD = ['arq', 'ahorros'];
+
+        const origenEsMXN = cuentasMXN.includes(cuentaOrigen);
+        const destinoEsMXN = cuentasMXN.includes(cuentaDest);
+
+        let cantidadFinal = cantidadOrigen;
+        let detalleConversion = "";
+
+        // Si cruzan divisas, hacemos la conversión
+        if (origenEsMXN !== destinoEsMXN) {
+            const precioDolar = await obtenerTipoCambio();
+            
+            if (origenEsMXN && !destinoEsMXN) {
+                // MXN a USD (Compra de dólares -> +50 centavos de margen de casa de cambio)
+                const tasaVenta = precioDolar + 0.50;
+                cantidadFinal = cantidadOrigen / tasaVenta;
+                detalleConversion = `\n💱 Tasa de cambio: $${tasaVenta.toFixed(2)}`;
+            } else {
+                // USD a MXN (Venta de dólares -> -50 centavos de margen)
+                const tasaCompra = precioDolar - 0.50;
+                cantidadFinal = cantidadOrigen * tasaCompra;
+                detalleConversion = `\n💱 Tasa de cambio: $${tasaCompra.toFixed(2)}`;
+            }
+        }
+
         transaccionData = {
             tipo: 'transferencia',
-            cantidad: parseFloat(coincidencia[1]),
+            cantidad: cantidadOrigen,
+            cantidadRecibida: parseFloat(cantidadFinal.toFixed(2)), // Guardamos lo que realmente llega
             concepto: 'Traspaso entre cuentas',
-            cuenta: coincidencia[2].toLowerCase(), // De dónde sale el dinero
-            cuentaDestino: coincidencia[3].toLowerCase() // A dónde entra
+            cuenta: cuentaOrigen,
+            cuentaDestino: cuentaDest
         };
-        mensajeRespuesta = `🔄 ¡TRANSFERENCIA Guardada!\n💰 $${transaccionData.cantidad}\n📤 De: ${transaccionData.cuenta.toUpperCase()}\n📥 A: ${transaccionData.cuentaDestino.toUpperCase()}`;
+        
+        mensajeRespuesta = `🔄 ¡TRANSFERENCIA Guardada!\n📤 Salió: ${cantidadOrigen} (${cuentaOrigen.toUpperCase()})\n📥 Entró: ${cantidadFinal.toFixed(2)} (${cuentaDest.toUpperCase()})${detalleConversion}`;
     }
 
     // Si detectó un formato válido, lo guarda en BD
