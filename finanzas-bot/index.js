@@ -174,7 +174,7 @@ bot.on('text', async (ctx) => {
             }
         });
 
-    } catch (error) {
+   } catch (error) {
         console.error("Error procesando con IA:", error);
         ctx.telegram.editMessageText(ctx.chat.id, mensajeEspera.message_id, null, '❌ No pude entender esa instrucción. Intenta ser un poco más claro con la cantidad y las cuentas.');
     }
