@@ -98,15 +98,19 @@ bot.on('text', async (ctx) => {
         });
 
         const prompt = `
-        Eres una API financiera. Analiza el siguiente mensaje del usuario y extrae los datos de la transacción.
+        Eres el backend de una app financiera. Analiza este mensaje del usuario y extrae los datos.
         
-        REGLAS ESTRICTAS:
-        1. Cuentas válidas: "efectivo", "arq", "banorte", "ahorros". Si menciona banco, es banorte. Si menciona dólares físicos, es arq. Si menciona cochinito/guardado, es ahorros.
-        2. Tipos válidos: "gasto", "ingreso", "transferencia".
-        3. Si es un gasto o ingreso, "cuentaDestino" debe ser null. Si falta el concepto, usa "Varios".
-        4. Si es transferencia, debes identificar "cuenta" (origen) y "cuentaDestino".
-        5. Devuelve ÚNICAMENTE un objeto JSON con este formato exacto:
-        {"tipo": "gasto", "cantidad": 150, "concepto": "cine", "cuenta": "banorte", "cuentaDestino": null}
+        DICCIONARIO Y REGLAS ESTRICTAS:
+        1. Tipos de movimiento: 
+           - Si el usuario dice "compré", "pagué", "me costó", "gasté", es un "gasto".
+           - Si dice "me pagaron", "gané", "recibí", es un "ingreso".
+           - Si mueve dinero entre sus propias cuentas, es "transferencia".
+        2. Cuentas válidas: "efectivo", "arq", "banorte", "ahorros". (Si dice "banco" o "tarjeta" = banorte. Si dice "dólares físicos" = arq. Si dice "cochinito" = ahorros).
+        3. Regla de oro: Si el usuario menciona un GASTO pero NO dice con qué pagó, asume AUTOMÁTICAMENTE que la cuenta es "efectivo".
+        4. Si falta el concepto del gasto/ingreso, usa "Varios".
+        
+        Devuelve ÚNICAMENTE un objeto JSON válido, sin texto extra, sin formato markdown, con esta estructura exacta:
+        {"tipo": "gasto", "cantidad": 60, "concepto": "soda", "cuenta": "efectivo", "cuentaDestino": null}
         
         Mensaje del usuario: "${mensajeUsuario}"
         `;
