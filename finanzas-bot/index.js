@@ -154,3 +154,15 @@ console.log('🤖 Bot de finanzas corriendo...');
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+// Servidor Web "Fantasma" para engañar a Render y evitar el error 254
+const http = require('http');
+const puerto = process.env.PORT || 3000;
+
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.write('El Bot de Finanzas esta activo 🤖');
+    res.end();
+}).listen(puerto, () => {
+    console.log(`🌐 Servidor web fantasma escuchando en el puerto ${puerto}`);
+});
