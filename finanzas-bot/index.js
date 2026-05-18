@@ -14,8 +14,8 @@ const transaccionSchema = new mongoose.Schema({
     cantidad: { type: Number, required: true },
     cantidadRecibida: { type: Number }, // Para transferencias cruzadas
     concepto: { type: String, required: true },
-    cuenta: { type: String, enum: ['efectivo', 'arq', 'banorte', 'ahorros'], required: true },
-    cuentaDestino: { type: String, enum: ['efectivo', 'arq', 'banorte', 'ahorros'] }, 
+    cuenta: { type: String, enum: ['efectivo', 'arq', 'BBVA', 'ahorros'], required: true },
+    cuentaDestino: { type: String, enum: ['efectivo', 'arq', 'BBVA', 'ahorros'] }, 
     fecha: { type: Date, default: Date.now }
 });
 
@@ -39,14 +39,14 @@ async function obtenerTipoCambio() {
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
 bot.start((ctx) => {
-    ctx.reply('¡Hola! Soy tu bot de finanzas impulsado por IA.\n\nPuedes hablarme normal, por ejemplo:\n"Me gasté 150 en tacos de mi banorte"\n"Transfiere 50 dólares físicos al cochinito"');
+    ctx.reply('¡Hola! Soy tu bot de finanzas impulsado por IA.\n\nPuedes hablarme normal, por ejemplo:\n"Me gasté 150 en tacos de mi BBVA"\n"Transfiere 50 dólares físicos al cochinito"');
 });
 
 // 📌 5. COMANDOS: Balance Multidivisa
 bot.command('balance', async (ctx) => {
     try {
         const transacciones = await Transaccion.find();
-        let saldos = { efectivo: 0, arq: 0, banorte: 0, ahorros: 0 };
+        let saldos = { efectivo: 0, arq: 0, BBVA: 0, ahorros: 0 };
 
         transacciones.forEach(t => {
             if (t.tipo === 'ingreso') {
@@ -59,7 +59,7 @@ bot.command('balance', async (ctx) => {
             }
         });
 
-        const totalPesos = saldos.efectivo + saldos.banorte;
+        const totalPesos = saldos.efectivo + saldos.BBVA;
         const totalDolares = saldos.arq + saldos.ahorros;
         const precioDolar = await obtenerTipoCambio();
         const patrimonioGlobalMXN = totalPesos + (totalDolares * precioDolar);
@@ -68,7 +68,7 @@ bot.command('balance', async (ctx) => {
             `💵 Dólar actual: $${precioDolar.toFixed(2)} MXN\n\n` +
             `🇲🇽 *Cuentas en Pesos (MXN)*\n` +
             `💵 Efectivo: $${saldos.efectivo.toFixed(2)}\n` +
-            `🏦 Banorte: $${saldos.banorte.toFixed(2)}\n` +
+            `🏦 BBVA: $${saldos.BBVA.toFixed(2)}\n` +
             `🔹 Total MXN: $${totalPesos.toFixed(2)}\n\n` +
             `🇺🇸 *Cuentas en Dólares (USD)*\n` +
             `🏢 ARQ: $${saldos.arq.toFixed(2)}\n` +
@@ -105,7 +105,7 @@ bot.on('text', async (ctx) => {
            - Si el usuario dice "compré", "pagué", "me costó", "gasté", es un "gasto".
            - Si dice "me pagaron", "gané", "recibí", es un "ingreso".
            - Si mueve dinero entre sus propias cuentas, es "transferencia".
-        2. Cuentas válidas: "efectivo", "arq", "banorte", "ahorros". (Si dice "banco" o "tarjeta" = banorte. Si dice "dólares físicos" = arq. Si dice "cochinito" = ahorros).
+        2. Cuentas válidas: "efectivo", "arq", "BBVA", "ahorros". (Si dice "banco" o "tarjeta" = BBVA. Si dice "dólares físicos" = arq. Si dice "cochinito" = ahorros).
         3. Regla de oro: Si el usuario menciona un GASTO pero NO dice con qué pagó, asume AUTOMÁTICAMENTE que la cuenta es "efectivo".
         4. Si falta el concepto del gasto/ingreso, usa "Varios".
         
@@ -133,7 +133,7 @@ bot.on('text', async (ctx) => {
             mensajeRespuesta = `${icono} ¡${transaccionData.tipo.toUpperCase()} Guardado!\n💰 $${transaccionData.cantidad} en ${transaccionData.concepto}\n🏦 Cuenta: ${transaccionData.cuenta.toUpperCase()}`;
         
         } else if (datosGenerados.tipo === 'transferencia') {
-            const cuentasMXN = ['efectivo', 'banorte'];
+            const cuentasMXN = ['efectivo', 'BBVA'];
             const origenEsMXN = cuentasMXN.includes(datosGenerados.cuenta);
             const destinoEsMXN = cuentasMXN.includes(datosGenerados.cuentaDestino);
 
