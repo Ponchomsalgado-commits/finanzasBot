@@ -93,12 +93,12 @@ bot.on('text', async (ctx) => {
 
     try {
         const model = genAI.getGenerativeModel({ 
-            model: "gemini-3.0-flash",
+            model: "gemini-2.0-flash",
             generationConfig: { responseMimeType: "application/json" }
         });
 
         const prompt = `
-        Eres el backend de una app financiera. Analiza este mensaje del usuario y extrae los datos.
+        Eres el backend de una app financiera.  Analiza este mensaje del usuario y extrae los datos.
         
         DICCIONARIO Y REGLAS ESTRICTAS:
         1. Tipos de movimiento: 
