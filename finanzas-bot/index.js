@@ -24,14 +24,22 @@ const Transaccion = mongoose.model('Transaccion', transaccionSchema);
 // 3. Inicializamos las APIs externas (Gemini y ExchangeRate)
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
+// ✅ MEJORA 3: Caché para el tipo de cambio (evita llamadas repetidas a la API externa)
+let cacheDolar = { valor: null, timestamp: 0 };
+
 async function obtenerTipoCambio() {
+    const CINCO_MINUTOS = 5 * 60 * 1000;
+    if (cacheDolar.valor && (Date.now() - cacheDolar.timestamp < CINCO_MINUTOS)) {
+        return cacheDolar.valor;
+    }
     try {
         const response = await fetch('https://api.exchangerate-api.com/v4/latest/USD');
         const data = await response.json();
-        return data.rates.MXN; 
+        cacheDolar = { valor: data.rates.MXN, timestamp: Date.now() };
+        return cacheDolar.valor;
     } catch (error) {
         console.error('Error al obtener el dólar:', error);
-        return 17.00; // Valor de emergencia
+        return cacheDolar.valor || 17.00; // Usa el último valor conocido antes del fallback fijo
     }
 }
 
@@ -42,24 +50,79 @@ bot.start((ctx) => {
     ctx.reply('¡Hola! Soy tu bot de finanzas impulsado por IA.\n\nPuedes hablarme normal, por ejemplo:\n"Me gasté 150 en tacos de mi BBVA"\n"Transfiere 50 dólares físicos al cochinito"\n"Editar BBVA a 250"');
 });
 
+// ✅ MEJORA 1: Función auxiliar para calcular saldos usando aggregation de MongoDB
+// En lugar de traer TODAS las transacciones a JS y sumar ahí, MongoDB hace el trabajo
+async function calcularSaldos() {
+    const resultado = await Transaccion.aggregate([
+        {
+            $group: {
+                _id: null,
+                efectivo: {
+                    $sum: {
+                        $switch: {
+                            branches: [
+                                { case: { $and: [{ $eq: ['$tipo', 'ingreso'] }, { $eq: ['$cuenta', 'efectivo'] }] }, then: '$cantidad' },
+                                { case: { $and: [{ $eq: ['$tipo', 'gasto'] }, { $eq: ['$cuenta', 'efectivo'] }] }, then: { $multiply: ['$cantidad', -1] } },
+                                { case: { $and: [{ $eq: ['$tipo', 'transferencia'] }, { $eq: ['$cuenta', 'efectivo'] }] }, then: { $multiply: ['$cantidad', -1] } },
+                                { case: { $and: [{ $eq: ['$tipo', 'transferencia'] }, { $eq: ['$cuentaDestino', 'efectivo'] }] }, then: { $ifNull: ['$cantidadRecibida', '$cantidad'] } },
+                            ],
+                            default: 0
+                        }
+                    }
+                },
+                arq: {
+                    $sum: {
+                        $switch: {
+                            branches: [
+                                { case: { $and: [{ $eq: ['$tipo', 'ingreso'] }, { $eq: ['$cuenta', 'arq'] }] }, then: '$cantidad' },
+                                { case: { $and: [{ $eq: ['$tipo', 'gasto'] }, { $eq: ['$cuenta', 'arq'] }] }, then: { $multiply: ['$cantidad', -1] } },
+                                { case: { $and: [{ $eq: ['$tipo', 'transferencia'] }, { $eq: ['$cuenta', 'arq'] }] }, then: { $multiply: ['$cantidad', -1] } },
+                                { case: { $and: [{ $eq: ['$tipo', 'transferencia'] }, { $eq: ['$cuentaDestino', 'arq'] }] }, then: { $ifNull: ['$cantidadRecibida', '$cantidad'] } },
+                            ],
+                            default: 0
+                        }
+                    }
+                },
+                BBVA: {
+                    $sum: {
+                        $switch: {
+                            branches: [
+                                { case: { $and: [{ $eq: ['$tipo', 'ingreso'] }, { $eq: ['$cuenta', 'BBVA'] }] }, then: '$cantidad' },
+                                { case: { $and: [{ $eq: ['$tipo', 'gasto'] }, { $eq: ['$cuenta', 'BBVA'] }] }, then: { $multiply: ['$cantidad', -1] } },
+                                { case: { $and: [{ $eq: ['$tipo', 'transferencia'] }, { $eq: ['$cuenta', 'BBVA'] }] }, then: { $multiply: ['$cantidad', -1] } },
+                                { case: { $and: [{ $eq: ['$tipo', 'transferencia'] }, { $eq: ['$cuentaDestino', 'BBVA'] }] }, then: { $ifNull: ['$cantidadRecibida', '$cantidad'] } },
+                            ],
+                            default: 0
+                        }
+                    }
+                },
+                ahorros: {
+                    $sum: {
+                        $switch: {
+                            branches: [
+                                { case: { $and: [{ $eq: ['$tipo', 'ingreso'] }, { $eq: ['$cuenta', 'ahorros'] }] }, then: '$cantidad' },
+                                { case: { $and: [{ $eq: ['$tipo', 'gasto'] }, { $eq: ['$cuenta', 'ahorros'] }] }, then: { $multiply: ['$cantidad', -1] } },
+                                { case: { $and: [{ $eq: ['$tipo', 'transferencia'] }, { $eq: ['$cuenta', 'ahorros'] }] }, then: { $multiply: ['$cantidad', -1] } },
+                                { case: { $and: [{ $eq: ['$tipo', 'transferencia'] }, { $eq: ['$cuentaDestino', 'ahorros'] }] }, then: { $ifNull: ['$cantidadRecibida', '$cantidad'] } },
+                            ],
+                            default: 0
+                        }
+                    }
+                }
+            }
+        }
+    ]);
+
+    // Si no hay transacciones, retorna saldos en cero
+    return resultado.length > 0 ? resultado[0] : { efectivo: 0, arq: 0, BBVA: 0, ahorros: 0 };
+}
+
 // 📌 5. COMANDOS: Balance Multidivisa
 bot.command('balance', async (ctx) => {
     try {
-        const transacciones = await Transaccion.find();
-        let saldos = { efectivo: 0, arq: 0, BBVA: 0, ahorros: 0 };
+        // ✅ MEJORA 1: Usa calcularSaldos() con aggregation en lugar de Transaccion.find()
+        const saldos = await calcularSaldos();
 
-        transacciones.forEach(t => {
-            if (t.tipo === 'ingreso') {
-                saldos[t.cuenta] += t.cantidad;
-            } else if (t.tipo === 'gasto') {
-                saldos[t.cuenta] -= t.cantidad;
-            } else if (t.tipo === 'transferencia') {
-                saldos[t.cuenta] -= t.cantidad; 
-                saldos[t.cuentaDestino] += (t.cantidadRecibida || t.cantidad); 
-            }
-        });
-
-        // 'ahorros' ahora suma en pesos
         const totalPesos = saldos.efectivo + saldos.BBVA + saldos.ahorros;
         const totalDolares = saldos.arq;
         const precioDolar = await obtenerTipoCambio();
@@ -85,6 +148,49 @@ bot.command('balance', async (ctx) => {
     }
 });
 
+// ✅ MEJORA 4: Prompt extraído como función para mayor mantenibilidad
+const buildPrompt = (mensajeUsuario) => `
+Eres el backend de una app financiera. Analiza este mensaje del usuario y extrae los datos.
+
+DICCIONARIO Y REGLAS ESTRICTAS:
+1. Tipos de movimiento: 
+   - "gasto": Si dice "compré", "pagué", "me costó", "gasté".
+   - "ingreso": Si dice "me pagaron", "gané", "recibí".
+   - "transferencia": Si mueve dinero entre sus propias cuentas.
+   - "ajuste": Si el usuario dice "editar", "ajustar", "cambiar", o establece un nuevo balance/saldo final (ej. "editar BBVA 250", "mi saldo en banco es 200").
+2. Cuentas válidas: "efectivo", "arq", "BBVA", "ahorros". (Si dice "banco" o "tarjeta" = BBVA. Si dice "dólares físicos" = arq. Si dice "cochinito" = ahorros).
+3. Regla de oro: Si menciona un GASTO pero NO dice con qué pagó, asume AUTOMÁTICAMENTE que la cuenta es "efectivo".
+4. Concepto: Si falta el concepto, usa "Varios". Si es un ajuste, usa "Ajuste manual".
+5. IMPORTANTE PARA AJUSTES: Si el tipo es "ajuste", la "cantidad" DEBE SER el saldo FINAL EXACTO que el usuario quiere tener en esa cuenta.
+
+Devuelve ÚNICAMENTE un objeto JSON válido, sin texto extra, con esta estructura:
+{"tipo": "ajuste", "cantidad": 250, "concepto": "Ajuste manual", "cuenta": "BBVA", "cuentaDestino": null}
+
+Mensaje del usuario: "${mensajeUsuario}"
+`;
+
+// ✅ MEJORA 5: Función de validación de la respuesta de Gemini antes de procesar
+function validarDatosIA(datos) {
+    const tiposValidos = ['gasto', 'ingreso', 'transferencia', 'ajuste'];
+    const cuentasValidas = ['efectivo', 'arq', 'BBVA', 'ahorros'];
+
+    if (!tiposValidos.includes(datos.tipo)) {
+        throw new Error(`Tipo de transacción no reconocido: "${datos.tipo}"`);
+    }
+    if (typeof datos.cantidad !== 'number' || datos.cantidad <= 0) {
+        throw new Error(`Cantidad inválida recibida: "${datos.cantidad}"`);
+    }
+    if (!cuentasValidas.includes(datos.cuenta)) {
+        throw new Error(`Cuenta de origen no válida: "${datos.cuenta}"`);
+    }
+    if (datos.tipo === 'transferencia' && !cuentasValidas.includes(datos.cuentaDestino)) {
+        throw new Error(`Cuenta destino no válida para transferencia: "${datos.cuentaDestino}"`);
+    }
+    if (datos.tipo === 'transferencia' && datos.cuenta === datos.cuentaDestino) {
+        throw new Error('La cuenta de origen y destino no pueden ser la misma.');
+    }
+}
+
 // 📌 6. PROCESAMIENTO DE LENGUAJE NATURAL CON GEMINI AI
 bot.on('text', async (ctx) => {
     const mensajeUsuario = ctx.message.text.trim();
@@ -98,29 +204,13 @@ bot.on('text', async (ctx) => {
             generationConfig: { responseMimeType: "application/json" }
         });
 
-        const prompt = `
-        Eres el backend de una app financiera. Analiza este mensaje del usuario y extrae los datos.
-        
-        DICCIONARIO Y REGLAS ESTRICTAS:
-        1. Tipos de movimiento: 
-           - "gasto": Si dice "compré", "pagué", "me costó", "gasté".
-           - "ingreso": Si dice "me pagaron", "gané", "recibí".
-           - "transferencia": Si mueve dinero entre sus propias cuentas.
-           - "ajuste": Si el usuario dice "editar", "ajustar", "cambiar", o establece un nuevo balance/saldo final (ej. "editar BBVA 250", "mi saldo en banco es 200").
-        2. Cuentas válidas: "efectivo", "arq", "BBVA", "ahorros". (Si dice "banco" o "tarjeta" = BBVA. Si dice "dólares físicos" = arq. Si dice "cochinito" = ahorros).
-        3. Regla de oro: Si menciona un GASTO pero NO dice con qué pagó, asume AUTOMÁTICAMENTE que la cuenta es "efectivo".
-        4. Concepto: Si falta el concepto, usa "Varios". Si es un ajuste, usa "Ajuste manual".
-        5. IMPORTANTE PARA AJUSTES: Si el tipo es "ajuste", la "cantidad" DEBE SER el saldo FINAL EXACTO que el usuario quiere tener en esa cuenta.
-        
-        Devuelve ÚNICAMENTE un objeto JSON válido, sin texto extra, con esta estructura:
-        {"tipo": "ajuste", "cantidad": 250, "concepto": "Ajuste manual", "cuenta": "BBVA", "cuentaDestino": null}
-        
-        Mensaje del usuario: "${mensajeUsuario}"
-        `;
-
-        const result = await model.generateContent(prompt);
+        // ✅ MEJORA 4: Usa la función buildPrompt en lugar del string hardcodeado
+        const result = await model.generateContent(buildPrompt(mensajeUsuario));
         const respuestaIA = result.response.text();
         const datosGenerados = JSON.parse(respuestaIA);
+
+        // ✅ MEJORA 5: Valida los datos antes de cualquier lógica de negocio
+        validarDatosIA(datosGenerados);
 
         let transaccionData = null;
         let mensajeRespuesta = "";
@@ -139,7 +229,6 @@ bot.on('text', async (ctx) => {
         
         // 🧮 LÓGICA 2: TRANSFERENCIAS
         } else if (datosGenerados.tipo === 'transferencia') {
-            // 'ahorros' ahora está en la lista de cuentas en MXN
             const cuentasMXN = ['efectivo', 'BBVA', 'ahorros'];
             const origenEsMXN = cuentasMXN.includes(datosGenerados.cuenta);
             const destinoEsMXN = cuentasMXN.includes(datosGenerados.cuentaDestino);
@@ -175,18 +264,10 @@ bot.on('text', async (ctx) => {
         } else if (datosGenerados.tipo === 'ajuste') {
             const cuentaObjetivo = datosGenerados.cuenta;
             const saldoDeseado = datosGenerados.cantidad;
-            
-            const transacciones = await Transaccion.find();
-            let saldoActual = 0;
 
-            transacciones.forEach(t => {
-                if (t.tipo === 'ingreso' && t.cuenta === cuentaObjetivo) saldoActual += t.cantidad;
-                else if (t.tipo === 'gasto' && t.cuenta === cuentaObjetivo) saldoActual -= t.cantidad;
-                else if (t.tipo === 'transferencia') {
-                    if (t.cuenta === cuentaObjetivo) saldoActual -= t.cantidad;
-                    if (t.cuentaDestino === cuentaObjetivo) saldoActual += (t.cantidadRecibida || t.cantidad);
-                }
-            });
+            // ✅ MEJORA 2: Usa calcularSaldos() con aggregation en lugar de Transaccion.find()
+            const saldos = await calcularSaldos();
+            const saldoActual = saldos[cuentaObjetivo] || 0;
 
             const diferencia = saldoDeseado - saldoActual;
 
@@ -224,7 +305,11 @@ bot.on('text', async (ctx) => {
 
     } catch (error) {
         console.error("Error procesando con IA:", error);
-        ctx.telegram.editMessageText(ctx.chat.id, mensajeEspera.message_id, null, `🚨 ERROR TÉCNICO: Verifica que hayas escrito una instrucción clara.`);
+        // ✅ MEJORA 5: Mensaje de error más descriptivo si el fallo fue en la validación
+        const mensajeError = error.message.startsWith('Tipo') || error.message.startsWith('Cantidad') || error.message.startsWith('Cuenta') || error.message.startsWith('La cuenta')
+            ? `⚠️ No pude interpretar tu mensaje correctamente. Intenta ser más específico (ej: "Gasté 150 en comida de mi BBVA").`
+            : `🚨 ERROR TÉCNICO: Verifica que hayas escrito una instrucción clara.`;
+        ctx.telegram.editMessageText(ctx.chat.id, mensajeEspera.message_id, null, mensajeError);
     }
 });
 
