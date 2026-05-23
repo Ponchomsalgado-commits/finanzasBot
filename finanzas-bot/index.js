@@ -1,7 +1,7 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const mongoose = require('mongoose');
-const { GoogleGenerativeAI } = require('@google/generative-ai'); // Integración de IA
+const { GoogleGenerativeAI } = require('@google/generative-ai'); 
 
 // 1. Conexión a MongoDB Atlas
 mongoose.connect(process.env.MONGO_URI)
@@ -12,7 +12,7 @@ mongoose.connect(process.env.MONGO_URI)
 const transaccionSchema = new mongoose.Schema({
     tipo: { type: String, enum: ['gasto', 'ingreso', 'transferencia'], required: true },
     cantidad: { type: Number, required: true },
-    cantidadRecibida: { type: Number }, // Para transferencias cruzadas
+    cantidadRecibida: { type: Number }, 
     concepto: { type: String, required: true },
     cuenta: { type: String, enum: ['efectivo', 'arq', 'BBVA', 'ahorros'], required: true },
     cuentaDestino: { type: String, enum: ['efectivo', 'arq', 'BBVA', 'ahorros'] }, 
@@ -39,7 +39,7 @@ async function obtenerTipoCambio() {
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
 bot.start((ctx) => {
-    ctx.reply('¡Hola! Soy tu bot de finanzas impulsado por IA.\n\nPuedes hablarme normal, por ejemplo:\n"Me gasté 150 en tacos de mi BBVA"\n"Transfiere 50 dólares físicos al cochinito"');
+    ctx.reply('¡Hola! Soy tu bot de finanzas impulsado por IA.\n\nPuedes hablarme normal, por ejemplo:\n"Me gasté 150 en tacos de mi BBVA"\n"Transfiere 50 dólares físicos al cochinito"\n"Editar BBVA a 250"');
 });
 
 // 📌 5. COMANDOS: Balance Multidivisa
@@ -59,8 +59,9 @@ bot.command('balance', async (ctx) => {
             }
         });
 
-        const totalPesos = saldos.efectivo + saldos.BBVA;
-        const totalDolares = saldos.arq + saldos.ahorros;
+        // 'ahorros' ahora suma en pesos
+        const totalPesos = saldos.efectivo + saldos.BBVA + saldos.ahorros;
+        const totalDolares = saldos.arq;
         const precioDolar = await obtenerTipoCambio();
         const patrimonioGlobalMXN = totalPesos + (totalDolares * precioDolar);
 
@@ -69,10 +70,10 @@ bot.command('balance', async (ctx) => {
             `🇲🇽 *Cuentas en Pesos (MXN)*\n` +
             `💵 Efectivo: $${saldos.efectivo.toFixed(2)}\n` +
             `🏦 BBVA: $${saldos.BBVA.toFixed(2)}\n` +
+            `🐷 Ahorros: $${saldos.ahorros.toFixed(2)}\n` +
             `🔹 Total MXN: $${totalPesos.toFixed(2)}\n\n` +
             `🇺🇸 *Cuentas en Dólares (USD)*\n` +
             `🏢 ARQ: $${saldos.arq.toFixed(2)}\n` +
-            `🐷 Ahorros: $${saldos.ahorros.toFixed(2)}\n` +
             `🔹 Total USD: $${totalDolares.toFixed(2)}\n` +
             `➖➖➖➖➖➖➖➖\n` +
             `💰 *PATRIMONIO TOTAL: $${patrimonioGlobalMXN.toFixed(2)} MXN*`;
@@ -89,7 +90,7 @@ bot.on('text', async (ctx) => {
     const mensajeUsuario = ctx.message.text.trim();
     if (mensajeUsuario.startsWith('/')) return; // Ignorar comandos mal escritos
 
-    const mensajeEspera = await ctx.reply('🤔 Analizando transacción...');
+    const mensajeEspera = await ctx.reply('🤔 Analizando...');
 
     try {
         const model = genAI.getGenerativeModel({ 
@@ -98,19 +99,21 @@ bot.on('text', async (ctx) => {
         });
 
         const prompt = `
-        Eres el backend de una app financiera.  Analiza este mensaje del usuario y extrae los datos.
+        Eres el backend de una app financiera. Analiza este mensaje del usuario y extrae los datos.
         
         DICCIONARIO Y REGLAS ESTRICTAS:
         1. Tipos de movimiento: 
-           - Si el usuario dice "compré", "pagué", "me costó", "gasté", es un "gasto".
-           - Si dice "me pagaron", "gané", "recibí", es un "ingreso".
-           - Si mueve dinero entre sus propias cuentas, es "transferencia".
+           - "gasto": Si dice "compré", "pagué", "me costó", "gasté".
+           - "ingreso": Si dice "me pagaron", "gané", "recibí".
+           - "transferencia": Si mueve dinero entre sus propias cuentas.
+           - "ajuste": Si el usuario dice "editar", "ajustar", "cambiar", o establece un nuevo balance/saldo final (ej. "editar BBVA 250", "mi saldo en banco es 200").
         2. Cuentas válidas: "efectivo", "arq", "BBVA", "ahorros". (Si dice "banco" o "tarjeta" = BBVA. Si dice "dólares físicos" = arq. Si dice "cochinito" = ahorros).
-        3. Regla de oro: Si el usuario menciona un GASTO pero NO dice con qué pagó, asume AUTOMÁTICAMENTE que la cuenta es "efectivo".
-        4. Si falta el concepto del gasto/ingreso, usa "Varios".
+        3. Regla de oro: Si menciona un GASTO pero NO dice con qué pagó, asume AUTOMÁTICAMENTE que la cuenta es "efectivo".
+        4. Concepto: Si falta el concepto, usa "Varios". Si es un ajuste, usa "Ajuste manual".
+        5. IMPORTANTE PARA AJUSTES: Si el tipo es "ajuste", la "cantidad" DEBE SER el saldo FINAL EXACTO que el usuario quiere tener en esa cuenta.
         
-        Devuelve ÚNICAMENTE un objeto JSON válido, sin texto extra, sin formato markdown, con esta estructura exacta:
-        {"tipo": "gasto", "cantidad": 60, "concepto": "soda", "cuenta": "efectivo", "cuentaDestino": null}
+        Devuelve ÚNICAMENTE un objeto JSON válido, sin texto extra, con esta estructura:
+        {"tipo": "ajuste", "cantidad": 250, "concepto": "Ajuste manual", "cuenta": "BBVA", "cuentaDestino": null}
         
         Mensaje del usuario: "${mensajeUsuario}"
         `;
@@ -121,7 +124,9 @@ bot.on('text', async (ctx) => {
 
         let transaccionData = null;
         let mensajeRespuesta = "";
+        let nuevaTransaccion = null;
 
+        // 🧮 LÓGICA 1: GASTOS E INGRESOS
         if (datosGenerados.tipo === 'gasto' || datosGenerados.tipo === 'ingreso') {
             transaccionData = {
                 tipo: datosGenerados.tipo,
@@ -132,8 +137,10 @@ bot.on('text', async (ctx) => {
             const icono = transaccionData.tipo === 'ingreso' ? '📈' : '📉';
             mensajeRespuesta = `${icono} ¡${transaccionData.tipo.toUpperCase()} Guardado!\n💰 $${transaccionData.cantidad} en ${transaccionData.concepto}\n🏦 Cuenta: ${transaccionData.cuenta.toUpperCase()}`;
         
+        // 🧮 LÓGICA 2: TRANSFERENCIAS
         } else if (datosGenerados.tipo === 'transferencia') {
-            const cuentasMXN = ['efectivo', 'BBVA'];
+            // 'ahorros' ahora está en la lista de cuentas en MXN
+            const cuentasMXN = ['efectivo', 'BBVA', 'ahorros'];
             const origenEsMXN = cuentasMXN.includes(datosGenerados.cuenta);
             const destinoEsMXN = cuentasMXN.includes(datosGenerados.cuentaDestino);
 
@@ -163,20 +170,61 @@ bot.on('text', async (ctx) => {
             };
             
             mensajeRespuesta = `🔄 ¡TRANSFERENCIA Guardada!\n📤 Salió: ${datosGenerados.cantidad} (${datosGenerados.cuenta.toUpperCase()})\n📥 Entró: ${cantidadFinal.toFixed(2)} (${datosGenerados.cuentaDestino.toUpperCase()})${detalleConversion}`;
+        
+        // 🧮 LÓGICA 3: AJUSTES MANUALES
+        } else if (datosGenerados.tipo === 'ajuste') {
+            const cuentaObjetivo = datosGenerados.cuenta;
+            const saldoDeseado = datosGenerados.cantidad;
+            
+            const transacciones = await Transaccion.find();
+            let saldoActual = 0;
+
+            transacciones.forEach(t => {
+                if (t.tipo === 'ingreso' && t.cuenta === cuentaObjetivo) saldoActual += t.cantidad;
+                else if (t.tipo === 'gasto' && t.cuenta === cuentaObjetivo) saldoActual -= t.cantidad;
+                else if (t.tipo === 'transferencia') {
+                    if (t.cuenta === cuentaObjetivo) saldoActual -= t.cantidad;
+                    if (t.cuentaDestino === cuentaObjetivo) saldoActual += (t.cantidadRecibida || t.cantidad);
+                }
+            });
+
+            const diferencia = saldoDeseado - saldoActual;
+
+            if (diferencia === 0) {
+                mensajeRespuesta = `✅ El saldo de *${cuentaObjetivo.toUpperCase()}* ya es de **$${saldoDeseado.toFixed(2)}**.\nNo se requiere ningún ajuste.`;
+            } else {
+                const tipoAjuste = diferencia > 0 ? 'ingreso' : 'gasto';
+                const cantidadAjuste = Math.abs(diferencia);
+
+                transaccionData = {
+                    tipo: tipoAjuste,
+                    cantidad: parseFloat(cantidadAjuste.toFixed(2)),
+                    concepto: 'Ajuste manual de saldo',
+                    cuenta: cuentaObjetivo
+                };
+
+                const iconoAjuste = diferencia > 0 ? '📈' : '📉';
+                mensajeRespuesta = `✅ *SALDO ACTUALIZADO*\n🏦 Cuenta: ${cuentaObjetivo.toUpperCase()}\n💰 Nuevo saldo: *$${saldoDeseado.toFixed(2)}*\n\n_(${iconoAjuste} Ajuste interno de $${cantidadAjuste.toFixed(2)} aplicado)_`;
+            }
         }
 
-        const nuevaTransaccion = new Transaccion(transaccionData);
-        await nuevaTransaccion.save();
+        // 💾 GUARDADO EN BASE DE DATOS
+        let opcionesMensaje = { parse_mode: 'Markdown' };
 
-        ctx.telegram.editMessageText(ctx.chat.id, mensajeEspera.message_id, null, mensajeRespuesta, {
-            reply_markup: {
+        if (transaccionData) {
+            nuevaTransaccion = new Transaccion(transaccionData);
+            await nuevaTransaccion.save();
+            
+            opcionesMensaje.reply_markup = {
                 inline_keyboard: [[ Markup.button.callback('❌ Borrar registro', `del_${nuevaTransaccion._id}`) ]]
-            }
-        });
+            };
+        }
+
+        ctx.telegram.editMessageText(ctx.chat.id, mensajeEspera.message_id, null, mensajeRespuesta, opcionesMensaje);
 
     } catch (error) {
         console.error("Error procesando con IA:", error);
-        ctx.telegram.editMessageText(ctx.chat.id, mensajeEspera.message_id, null, `🚨 ERROR TÉCNICO: ${error.message}`);
+        ctx.telegram.editMessageText(ctx.chat.id, mensajeEspera.message_id, null, `🚨 ERROR TÉCNICO: Verifica que hayas escrito una instrucción clara.`);
     }
 });
 
